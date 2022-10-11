@@ -820,6 +820,49 @@ mod async_test {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_wait_with_read_lock() {
+        let max_cost = 10_000;
+        let lru = Arc::new(
+            AsyncCacheBuilder::new(max_cost * 10, max_cost as i64)
+                .set_ignore_internal_cost(true)
+                .finalize(tokio::spawn)
+                .expect("failed to create cache"),
+        );
+
+        let key = 1;
+        let cost = 1;
+
+        let mut tasks = Vec::new();
+
+        for i in 1..=10_000 {
+            let lru = Arc::clone(&lru);
+            tasks.push(tokio::spawn(async move {
+                let inner_cache = match lru.get(&key) {
+                    Some(v) => v,
+                    None => {
+                        let inner_lru = AsyncCacheBuilder::new(max_cost * 10, max_cost as i64)
+                            .set_ignore_internal_cost(true)
+                            .finalize(tokio::spawn)
+                            .expect("failed to create cache");
+                        lru.insert(key, inner_lru, cost).await;
+                        lru.wait().await.unwrap();
+                        lru.get(&key).unwrap()
+                    }
+                };
+                let inner_cache = inner_cache.value();
+                inner_cache.insert(i, 123, cost).await;
+                eprintln!("i = {i}, len before wait = {}", inner_cache.len());
+                // removing this wait avoids deadlock
+                inner_cache.wait().await.unwrap();
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn test_cache_key_to_hash() {
         let ctr = Arc::new(AtomicU64::new(0));
